@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>jss_url</key>
+	<string>JSS_URL_VALUE/UUID-UUID_HERE</string>
+	<key>last_management_framework_change_id</key>
+	<string>5</string>
+	<key>max_clock_skew</key>
+	<string>-1</string>
+	<key>microsoftCAEnabled</key>
+	<false/>
+	<key>package_validation_level</key>
+	<string>1</string>
+	<key>self_service_app_path</key>
+	<string>/Applications/Self Service.app</string>
+	<key>verifySSLCert</key>
+	<string>never</string>
+</dict>
+</plist>

