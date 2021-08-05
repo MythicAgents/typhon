@@ -10,7 +10,7 @@ Typhon is a macOS specific payload aimed at targetting Jamf managed devices. Thi
 
 - Typhon was presented in the Black Hat USA 2021 talk [Come to the Dark Side, We Have Apples: Turning macOS Management Evil](https://www.blackhat.com/us-21/briefings/schedule/index.html#come-to-the-dark-side-we-have-apples-turning-macos-management-evil-23582).
 
-- Further information about detecting typhon can be found at [TheMacPack.io - Detecting Orthrus and Typhon](https://themacpack.io/posts/detecting-orthrus-and-typhon)
+- Further information about detecting typhon can be found at [TheMacPack.io - Detecting Orthrus and Typhon](https://themacpack.io/posts/Detecting-Orthrus-and-Typhon/)
 
 ## Installation
 To install typhon, you'll need Mythic installed on a remote computer. You can find installation instructions for Mythic at the [Mythic project page](https://github.com/its-a-feature/Mythic/).
