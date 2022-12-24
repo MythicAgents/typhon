@@ -7,39 +7,64 @@ from mythic_payloadtype_container.MythicRPC import *
 class AddUserArguments(TaskArguments):
     def __init__(self, command_line):
         super().__init__(command_line)
-        self.args = {
-            "fullname": CommandParameter(
+        self.args = [
+            CommandParameter(
                 name="fullname", 
                 type=ParameterType.String,
-                required=True, 
-                description="Full name for the new user"
+                description="Full name for the new user",
+                parameter_group_info=[
+                    ParameterGroupInfo(
+                        required=True,
+                        group_name="Defaults"
+                    )
+                ]
             ),
-            "username": CommandParameter(
+            CommandParameter(
                 name="username", 
                 type=ParameterType.String,
-                required=True, 
-                description="Username for the new user"
+                description="Username for the new user",
+                parameter_group_info=[
+                    ParameterGroupInfo(
+                        required=True,
+                        group_name="Defaults"
+                    )
+                ]
             ),
-            "password": CommandParameter(
+            CommandParameter(
                 name="password", 
                 type=ParameterType.String,
-                required=True, 
-                description="Password for the new user"
+                description="Password for the new user",
+                parameter_group_info=[
+                    ParameterGroupInfo(
+                        required=True,
+                        group_name="Defaults"
+                    )
+                ]
             ),
-            "home_directory": CommandParameter(
+            CommandParameter(
                 name="home_directory", 
                 type=ParameterType.String,
-                required=True, 
-                description="Username for the new user"
+                description="Username for the new user",
+                parameter_group_info=[
+                    ParameterGroupInfo(
+                        required=True,
+                        group_name="Defaults"
+                    )
+                ]
             ),
-            "administrator" : CommandParameter(
+            CommandParameter(
                 name="administrator", 
                 type=ParameterType.Boolean,
-                required=True,
                 default_value=False,
-                description="Do you want to provide administrative access to this user?"
+                description="Do you want to provide administrative access to this user?",
+                parameter_group_info=[
+                    ParameterGroupInfo(
+                        required=True,
+                        group_name="Defaults"
+                    )
+                ]
             )
-        }
+        ]
 
     # you must implement this function so that you can parse out user typed input into your parameters or load your parameters based on some JSON input
     async def parse_arguments(self):
