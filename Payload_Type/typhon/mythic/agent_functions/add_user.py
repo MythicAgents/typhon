@@ -5,8 +5,8 @@ from mythic_payloadtype_container.MythicRPC import *
 
 # create a class that extends TaskArguments class that will supply all the arguments needed for this command
 class AddUserArguments(TaskArguments):
-    def __init__(self, command_line):
-        super().__init__(command_line)
+    def __init__(self, command_line, **kwargs):
+        super().__init__(command_line, **kwargs)
         self.args = [
             CommandParameter(
                 name="fullname", 
