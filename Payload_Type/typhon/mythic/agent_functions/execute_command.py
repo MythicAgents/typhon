@@ -7,11 +7,11 @@ from mythic_payloadtype_container.MythicRPC import *
 class ExecuteArguments(TaskArguments):
     def __init__(self, command_line, **kwargs):
         super().__init__(command_line, **kwargs)
-        self.args = {
-            "script": CommandParameter(
+        self.args = [
+             CommandParameter(
                 name="script", type=ParameterType.String, description="Script to run"
             ),
-        }
+        ]
 
     # you must implement this function so that you can parse out user typed input into your parameters or load your parameters based on some JSON input
     async def parse_arguments(self):
