@@ -1,20 +1,27 @@
-from mythic_payloadtype_container.MythicCommandBase import *  # import the basics
-import json  # import any other code you might need
-# import the code for interacting with Files on the Mythic server
+from mythic_payloadtype_container.MythicCommandBase import *
 from mythic_payloadtype_container.MythicRPC import *
+import json
+import sys
+import base64
+
 
 # create a class that extends TaskArguments class that will supply all the arguments needed for this command
 class DeleteUserArguments(TaskArguments):
     def __init__(self, command_line):
         super().__init__(command_line)
-        self.args = {
-            "username": CommandParameter(
+        self.args = [
+            CommandParameter(
                 name="username", 
                 type=ParameterType.String,
-                required=True, 
-                description="Username for the user to be deleted"
+                description="Username for the user to be deleted",
+                parameter_group_info=[
+                    ParameterGroupInfo(
+                        required=True,
+                        group_name="Defaults"
+                    )
+                ]
             )
-        }
+        ]
 
     # you must implement this function so that you can parse out user typed input into your parameters or load your parameters based on some JSON input
     async def parse_arguments(self):
@@ -34,12 +41,15 @@ class DeleteUserCommand(CommandBase):
     cmd = "delete_user"
     needs_admin = True
     help_cmd = "delete_user"
-    description = "Deletes a specified user through the Jamf agent."
+    description = ( 
+        "Deletes a specified user through the Jamf agent."
+    )
     version = 1
     author = "@calhall"
     argument_class = DeleteUserArguments
-    attackmapping = []
+    attackmapping = ['T1548.002']
     browser_script = None
+
 
     # this function is called after all of your arguments have been parsed and validated that each "required" parameter has a non-None value
     async def create_tasking(self, task: MythicTask) -> MythicTask:
