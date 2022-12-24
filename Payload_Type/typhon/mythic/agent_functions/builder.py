@@ -1,22 +1,29 @@
 from mythic_payloadtype_container.PayloadBuilder import *
 from mythic_payloadtype_container.MythicCommandBase import *
+from mythic_payloadtype_container.MythicRPC import *
 import sys
 import json
 
-# define your payload type class here, it must extend the PayloadType class though
+#define your payload type class here, it must extend the PayloadType class though
 class typhon(PayloadType):
 
     name = "typhon"  # name that would show up in the UI
     file_extension = "plist"  # default file extension to use when creating payloads
     author = "@calhall"  # author of the payload type
     supported_os = [SupportedOS.MacOS]  # supported OS and architecture combos
+
     wrapper = False  # does this payload type act as a wrapper for another payloads inside of it?
-    wrapped_payloads = []  # if so, which payload types. If you are writing a wrapper, you will need to modify this variable (adding in your wrapper's name) in the builder.py of each payload that you want to utilize your wrapper.
+    # if the payload supports any wrapper payloads, list those here
+    wrapped_payloads = [] # ex: "service_wrapper"
     note = """This payload is used to replace the Jamf config to hijack enrolled devices."""
     supports_dynamic_loading = False  # setting this to True allows users to only select a subset of commands when generating a payload
-    build_parameters = {}
+    build_parameters = [
+        #  these are all the build parameters that will be presented to the user when creating your payload
+        # we'll leave this blank for now
+    ]
     #  the names of the c2 profiles that your agent supports
     c2_profiles = ["jamfserver"]
+    translation_container = None
     # after your class has been instantiated by the mythic_service in this docker container and all required build parameters have values
     # then this function is called to actually build the payload
     async def build(self) -> BuildResponse:
