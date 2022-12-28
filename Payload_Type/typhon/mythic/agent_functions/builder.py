@@ -33,7 +33,8 @@ class typhon(PayloadType):
         # create the payload
         try:
             c2_code = open(self.agent_code_path / "com.jamfsoftware.jamf.plist").read()
-            c2_code = c2_code.replace("JSS_URL_VALUE", self.c2info[0].get_parameters_dict()['callback_host'])
+            callback_url = self.c2info[0].get_parameters_dict()['callback_host'] + ':' + self.c2info[0].get_parameters_dict()['callback_port']
+            c2_code = c2_code.replace("JSS_URL_VALUE", callback_url)
             c2_code = c2_code.replace("UUID_HERE", self.uuid)
 
             if len(self.c2info) != 1:
