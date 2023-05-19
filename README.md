@@ -6,6 +6,10 @@
 
 Typhon is a macOS specific payload aimed at targetting Jamf managed devices. This payload can be used to manipulate macOS devices into communicating with a Mythic instance, which acts as a Jamf server with the ability to execute commands.
 
+This version of Typhon is compatable with Mythic 3.0.
+
+Please use an older version if on Mythic 2.x.
+
 ## Talks & Publications
 
 - Typhon was presented in the Black Hat USA 2021 talk [Come to the Dark Side, We Have Apples: Turning macOS Management Evil](https://www.blackhat.com/us-21/briefings/schedule/index.html#come-to-the-dark-side-we-have-apples-turning-macos-management-evil-23582).

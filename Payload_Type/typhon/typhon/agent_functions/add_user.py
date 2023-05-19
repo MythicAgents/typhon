@@ -1,7 +1,8 @@
-from mythic_payloadtype_container.MythicCommandBase import *  # import the basics
-import json  # import any other code you might need
-# import the code for interacting with Files on the Mythic server
-from mythic_payloadtype_container.MythicRPC import *
+from mythic_container.MythicCommandBase import *
+import json
+from mythic_container.MythicRPC import *
+import sys
+import base64
 
 # create a class that extends TaskArguments class that will supply all the arguments needed for this command
 class AddUserArguments(TaskArguments):
@@ -59,7 +60,7 @@ class AddUserArguments(TaskArguments):
                 description="Do you want to provide administrative access to this user?",
                 parameter_group_info=[
                     ParameterGroupInfo(
-                        required=True,
+                        required=False,
                         group_name="Defaults"
                     )
                 ]
@@ -76,11 +77,10 @@ class AddUserArguments(TaskArguments):
                 self.add_arg("username", self.command_line)
                 self.add_arg("password", self.command_line)
                 self.add_arg("home_directory", self.command_line)
-                self.add_arg("administrator", self.command_line)
-
-                
+                self.add_arg("administrator", self.command_line)       
         else:
             raise ValueError("Missing arguments")
+
 
 
 # this is information about the command itself
@@ -92,17 +92,21 @@ class AddUserCommand(CommandBase):
     version = 1
     author = "@calhall"
     argument_class = AddUserArguments
-    attackmapping = []
+    attackmapping = ["T1136", "T1136.001", "T1548.004"]
     browser_script = None
+    attributes = CommandAttributes(
+        builtin=True
+    )
 
     # this function is called after all of your arguments have been parsed and validated that each "required" parameter has a non-None value
     async def create_tasking(self, task: MythicTask) -> MythicTask:
 
-        task.display_params = task.args.get_arg("fullname")
-        task.display_params = task.args.get_arg("username")
-        task.display_params = task.args.get_arg("password")
-        task.display_params = task.args.get_arg("home_directory")
-        task.display_params = task.args.get_arg("administrator")
+        task.display_params = "Fullname: " + task.args.get_arg("fullname")
+        task.display_params += ", Useraname: " + task.args.get_arg("username")
+        task.display_params += ", Password: " + task.args.get_arg("password")
+        task.display_params += ", HomeDirectory: " + task.args.get_arg("home_directory")
+        task.display_params += ", Administrator: " + task.args.get_arg("administrator")
+        
         return task
 
     async def process_response(self, response: AgentResponse):

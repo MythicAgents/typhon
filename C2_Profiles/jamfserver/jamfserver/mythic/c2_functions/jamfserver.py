@@ -1,12 +1,14 @@
-from mythic_c2_container.C2ProfileBase import *
+from mythic_container.C2ProfileBase import *
 
 
-class JamfServer(C2Profile):
+class jamfserver(C2Profile):
     name = "jamfserver"
     description = "Imitates a Jamf Pro Server to control enrolled devices."
     author = "@calhall"
     is_p2p = False
     is_server_routed = False
+    server_binary_path = pathlib.Path(".") / "jamfserver" / "c2_code" / "server"
+    server_folder_path = pathlib.Path(".") / "jamfserver" / "c2_code"
     parameters = [
         C2ProfileParameter(
             name="callback_port",

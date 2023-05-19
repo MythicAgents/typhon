@@ -1,0 +1,5 @@
+import mythic_container
+import asyncio
+import jamfserver.mythic.c2_functions.jamfserver
+
+mythic_container.mythic_service.start_and_run_forever()
